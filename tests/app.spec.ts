@@ -28,24 +28,24 @@ test('searches departures and shows replacement journey details', async ({ page 
 })
 
 test('shows each departure ID only once when the API returns duplicate observations', async ({ page }) => {
-  let observedIds: string[] = []
-  page.on('response', async (response) => {
-    if (new URL(response.url()).pathname !== '/api/avganger') return
-    const body = await response.json() as {
-      data?: { quays?: Array<{ estimatedCalls?: Array<{ datedServiceJourney?: { id?: string } }> }> }
-    }
-    observedIds = body.data?.quays?.flatMap((quay) =>
-      quay.estimatedCalls?.flatMap((call) => call.datedServiceJourney?.id ?? []) ?? [],
-    ) ?? []
-  })
-
   await page.goto('/')
   await page.getByLabel('Reisedato').fill('2026-11-03')
+  const departuresResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === '/api/avganger',
+  )
   await page.getByRole('button', { name: 'Finn avganger' }).click()
+  const body = await (await departuresResponse).json() as {
+    data: { quays: Array<{ estimatedCalls: Array<{ datedServiceJourney: { id: string } }> }> }
+  }
+  const observedIds = body.data.quays.flatMap((quay) =>
+    quay.estimatedCalls.map((call) => call.datedServiceJourney.id),
+  )
 
-  await expect.poll(() => observedIds).toHaveLength(9)
+  expect(observedIds).toHaveLength(9)
   expect(new Set(observedIds).size).toBe(8)
 
+  const cards = page.locator('.departure-card')
+  await expect(cards).toHaveCount(8)
   const displayedIds = await page.locator('.departure-id').allTextContents()
   expect(displayedIds).toHaveLength(8)
   expect(new Set(displayedIds).size).toBe(displayedIds.length)
