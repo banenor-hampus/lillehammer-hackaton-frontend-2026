@@ -48,7 +48,18 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Playwright starter Vite og backend automatisk. Backend settes eksplisitt til Mock med normale testdata. Testene dekker lasting av stasjoner, søk og rutedetaljer, unike avgangs-ID-er, ugyldig input, utilgjengelig backend og feil på ett detaljoppslag. `test-results/` inneholder eventuelle feilartefakter og er ignorert av Git.
+Playwright starter Vite og backend automatisk. Backend settes eksplisitt til Mock med normale testdata.
+
+Testene sjekker at:
+
+- stasjonslista lastes, og at første stasjon blir valgt.
+- et søk viser avganger og rutedetaljer, inkludert markering av buss-for-tog og stoppene på ruta.
+- dupliserte observasjoner fra API-et bare vises én gang per avgangs-ID.
+- ugyldig tidsvindu gir en forklarende valideringsfeil før søk.
+- utilgjengelig backend gir en synlig feilmelding, mens appen fortsatt rendres uten JavaScript-krasj.
+- feil på ett detaljoppslag viser feil på den avgangen, uten å blokkere resten av resultatene.
+
+`test-results/` inneholder eventuelle feilartefakter og er ignorert av Git.
 
 ## Funksjonalitet
 
