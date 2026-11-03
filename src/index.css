@@ -1,0 +1,43 @@
+:root {
+  font-family: 'DM Sans', 'Aptos', 'Segoe UI', sans-serif;
+  color: #1c3028;
+  background: #f4f6f1;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --ink: #1d3129;
+  --forest: #183637;
+  --lime: #e1f06a;
+  --paper: #fff;
+  --line: #e3e8df;
+  --muted: #78867d;
+  --error: #aa493c;
+  --mono: 'Cascadia Code', Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  color: var(--forest);
+  background: var(--lime);
+}
