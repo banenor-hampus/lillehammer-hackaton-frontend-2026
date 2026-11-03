@@ -21,6 +21,35 @@ VITE_API_BASE_URL=http://localhost:5087
 
 Backend må tillate frontendens origin i `Cors:AllowedOrigins`. Standardoppsettet tillater `http://localhost:5173`.
 
+## E2E-tester
+
+Frontendappen trenger bare Node.js/npm. E2E-testene bruker i tillegg .NET 10 SDK fordi Playwright starter backend automatisk og tester hele flyten fra frontend til API. Testene kjører i Chromium.
+
+Playwright-konfigurasjonen forventer backend-repoet som søskenmappe med navnet `lillehammer-hackaton`. Klon det fra samme foreldremappe som frontend:
+
+```powershell
+git clone https://github.com/bn-apps/lillehammer-hackaton.git
+```
+
+Mappene skal ligge slik:
+
+```text
+parent/
+├── lillehammer-hackaton/
+│   └── BussForTog.API/
+└── lillehammer-hackaton-frontend-2026/
+```
+
+Kjør deretter følgende fra frontend-mappen:
+
+```powershell
+npm install
+npx playwright install chromium
+npm run test:e2e
+```
+
+Playwright starter Vite og backend automatisk. Backend settes eksplisitt til Mock med normale testdata. Testene dekker lasting av stasjoner, søk og rutedetaljer, unike avgangs-ID-er, ugyldig input, utilgjengelig backend og feil på ett detaljoppslag. `test-results/` inneholder eventuelle feilartefakter og er ignorert av Git.
+
 ## Funksjonalitet
 
 - Henter tilgjengelige stasjoner fra `GET /api/stasjoner`.
