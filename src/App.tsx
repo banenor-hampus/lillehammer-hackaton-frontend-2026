@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import {
   getDepartures,
   getJourneyDetails,
   getStations,
   type Departure,
+  type JourneyCall,
   type JourneyDetails,
   type Station,
 } from './api'
@@ -14,15 +15,17 @@ const MAX_TIME_RANGE_MINUTES = 48 * 60
 const MAX_DEPARTURES = 20
 const API_MAX_OBSERVATIONS = 100
 const DETAIL_CONCURRENCY = 4
+const DEFAULT_PAGE_SIZE = MAX_DEPARTURES
 
-type FieldErrors = Partial<Record<'stationId' | 'date' | 'timeRange' | 'numberOfDepartures', string>>
+type FieldErrors = Partial<Record<'fromStationId' | 'toStationId' | 'date' | 'timeRange' | 'numberOfDepartures', string>>
 type DetailState =
   | { status: 'loading' }
   | { status: 'loaded'; journey: JourneyDetails; warnings: string[] }
   | { status: 'error'; message: string }
 
 interface SearchQuery {
-  stationId: string
+  fromStationId: string
+  toStationId: string
   date: string
   timeRangeSeconds: number
   pageSize: number
@@ -56,15 +59,21 @@ function isValidDate(value: string): boolean {
 }
 
 function validateForm(
-  stationId: string,
+  fromStationId: string,
+  toStationId: string,
   stations: Station[],
   date: string,
   timeRange: string,
   numberOfDepartures: string,
 ): FieldErrors {
   const errors: FieldErrors = {}
-  if (!stations.some((station) => station.id === stationId)) {
-    errors.stationId = 'Velg en stasjon fra listen.'
+  if (!stations.some((station) => station.id === fromStationId)) {
+    errors.fromStationId = 'Velg en gyldig avreisestasjon.'
+  }
+  if (!stations.some((station) => station.id === toStationId)) {
+    errors.toStationId = 'Velg en gyldig ankomststasjon.'
+  } else if (fromStationId === toStationId) {
+    errors.toStationId = 'Velg en annen stasjon enn avreisestasjonen.'
   }
   if (!isValidDate(date)) {
     errors.date = 'Velg en gyldig dato.'
@@ -124,10 +133,11 @@ function formatDate(value: string): string {
 
 function App() {
   const [stations, setStations] = useState<Station[]>([])
-  const [stationId, setStationId] = useState('')
+  const [fromStationId, setFromStationId] = useState('')
+  const [toStationId, setToStationId] = useState('')
   const [date, setDate] = useState(osloToday)
   const [timeRange, setTimeRange] = useState(DEFAULT_TIME_RANGE)
-  const [numberOfDepartures, setNumberOfDepartures] = useState(String(MAX_DEPARTURES))
+  const [numberOfDepartures, setNumberOfDepartures] = useState(String(DEFAULT_PAGE_SIZE))
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
   const [departures, setDepartures] = useState<Departure[]>([])
   const [activeQuery, setActiveQuery] = useState<SearchQuery | null>(null)
@@ -143,10 +153,13 @@ function App() {
   const [searching, setSearching] = useState(false)
   const [detailsLoaded, setDetailsLoaded] = useState(0)
   const [detailsLoading, setDetailsLoading] = useState(false)
+  const [replacementOnly, setReplacementOnly] = useState(false)
+  const [darkMode, setDarkMode] = useState(false)
   const requestId = useRef(0)
   const activeRequest = useRef<AbortController | null>(null)
   const detailsRef = useRef<Record<string, DetailState>>({})
   const resultsRef = useRef<HTMLElement | null>(null)
+  const advancedOptionsRef = useRef<HTMLDetailsElement | null>(null)
 
   useEffect(() => {
     detailsRef.current = details
@@ -158,7 +171,10 @@ function App() {
     getStations(controller.signal)
       .then((result) => {
         setStations(result)
-        if (result.length > 0) setStationId(result[0].id)
+        if (result.length > 0) {
+          setFromStationId(result[0].id)
+          setToStationId((result.find((station) => station.id !== result[0].id) ?? result[0]).id)
+        }
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) setRequestError(errorMessage(error))
@@ -175,13 +191,17 @@ function App() {
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const errors = validateForm(stationId, stations, date, timeRange, numberOfDepartures)
+    const errors = validateForm(fromStationId, toStationId, stations, date, timeRange, numberOfDepartures)
     setFieldErrors(errors)
     setRequestError('')
+    if (errors.timeRange || errors.numberOfDepartures) {
+      if (advancedOptionsRef.current) advancedOptionsRef.current.open = true
+    }
     if (Object.keys(errors).length > 0) return
 
     const query: SearchQuery = {
-      stationId,
+      fromStationId,
+      toStationId,
       date,
       timeRangeSeconds: (parseDurationMinutes(timeRange) ?? 0) * 60,
       pageSize: Math.min(Number(numberOfDepartures), MAX_DEPARTURES),
@@ -204,7 +224,7 @@ function App() {
     for (;;) {
       const result = await getDepartures(
         {
-          stationId: query.stationId,
+          stationId: query.fromStationId,
           date: query.date,
           timeRange: query.timeRangeSeconds,
           numberOfDepartures: limit,
@@ -304,12 +324,21 @@ function App() {
     void loadPage(activeQuery, targetPage)
   }
 
-  const displayedStationId = activeQuery?.stationId ?? stationId
+  const displayedFromStationId = activeQuery?.fromStationId ?? fromStationId
+  const displayedToStationId = activeQuery?.toStationId ?? toStationId
   const displayedDate = activeQuery?.date ?? date
-  const selectedStation = stations.find((station) => station.id === displayedStationId)
+  const selectedFromStation = stations.find((station) => station.id === displayedFromStationId)
+  const selectedToStation = stations.find((station) => station.id === displayedToStationId)
+  const visibleDepartures = departures.filter((departure) => {
+    const detail = details[departure.id]
+    if (detail?.status !== 'loaded') return false
+    const segment = getJourneySegment(detail.journey, displayedFromStationId, displayedToStationId)
+    if (!segment) return false
+    return !replacementOnly || isReplacementJourney(detail.journey)
+  })
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={darkMode ? 'dark' : 'light'}>
       <header className="topbar">
         <a className="brand" href="#" aria-label="Buss for tog – startsiden">
           <span className="brand-mark" aria-hidden="true">
@@ -320,7 +349,18 @@ function App() {
           </span>
           <span>Buss for tog</span>
         </a>
-        <span className="topbar-tag"><span className="status-dot" /> Reiseoversikt</span>
+        <div className="topbar-actions">
+          <span className="topbar-tag"><span className="status-dot" /> Reiseoversikt</span>
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={() => setDarkMode((current) => !current)}
+            aria-pressed={darkMode}
+          >
+            <span aria-hidden="true">{darkMode ? '☀' : '◐'}</span>
+            {darkMode ? 'Lys modus' : 'Mørk modus'}
+          </button>
+        </div>
       </header>
 
       <main>
@@ -354,34 +394,42 @@ function App() {
               <p className="eyebrow">PLANLEGG REISEN</p>
               <h2 id="search-title">Hvor skal du reise?</h2>
             </div>
-            <span className="step-badge"><span>01</span> Søk avganger</span>
           </div>
 
           <form onSubmit={handleSearch} noValidate>
             <div className="form-grid">
               <div className="field field-station">
-                <label htmlFor="station">Stasjon</label>
-                <div className="input-wrap">
-                  <span className="input-icon" aria-hidden="true">⌖</span>
-                  <select
-                    id="station"
-                    value={stationId}
-                    onChange={(event) => {
-                      setStationId(event.target.value)
-                      setFieldErrors((current) => ({ ...current, stationId: undefined }))
-                    }}
-                    disabled={stationsLoading || stations.length === 0}
-                    aria-invalid={Boolean(fieldErrors.stationId)}
-                    aria-describedby={fieldErrors.stationId ? 'station-error' : undefined}
-                  >
-                    {stationsLoading && <option value="">Henter stasjoner …</option>}
-                    {!stationsLoading && stations.length === 0 && <option value="">Ingen stasjoner</option>}
-                    {stations.map((station) => (
-                      <option key={station.id} value={station.id}>{station.name}</option>
-                    ))}
-                  </select>
-                </div>
-                {fieldErrors.stationId && <p className="field-error" id="station-error">{fieldErrors.stationId}</p>}
+                <label htmlFor="from-station">Fra stasjon</label>
+                <StationCombobox
+                  stations={stations}
+                  id="from-station"
+                  errorId="from-station-error"
+                  selectedId={fromStationId}
+                  disabled={stationsLoading || stations.length === 0}
+                  error={fieldErrors.fromStationId}
+                  onSelect={(value) => {
+                    setFromStationId(value)
+                    setFieldErrors((current) => ({ ...current, fromStationId: undefined, toStationId: undefined }))
+                  }}
+                />
+                {fieldErrors.fromStationId && <p className="field-error" id="from-station-error">{fieldErrors.fromStationId}</p>}
+              </div>
+
+              <div className="field field-station">
+                <label htmlFor="to-station">Til stasjon</label>
+                <StationCombobox
+                  stations={stations}
+                  id="to-station"
+                  errorId="to-station-error"
+                  selectedId={toStationId}
+                  disabled={stationsLoading || stations.length === 0}
+                  error={fieldErrors.toStationId}
+                  onSelect={(value) => {
+                    setToStationId(value)
+                    setFieldErrors((current) => ({ ...current, fromStationId: undefined, toStationId: undefined }))
+                  }}
+                />
+                {fieldErrors.toStationId && <p className="field-error" id="to-station-error">{fieldErrors.toStationId}</p>}
               </div>
 
               <div className="field">
@@ -405,62 +453,66 @@ function App() {
                 {fieldErrors.date && <p className="field-error" id="date-error">{fieldErrors.date}</p>}
               </div>
 
-              <div className="field">
-                <label htmlFor="time-range">Tidsvindu <span className="label-unit">(timer:minutter)</span></label>
-                <div className="input-wrap">
-                  <span className="input-icon" aria-hidden="true">◷</span>
-                  <input
-                    id="time-range"
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={5}
-                    placeholder="HH:MM"
-                    autoComplete="off"
-                    value={timeRange}
-                    onChange={(event) => {
-                      setTimeRange(formatTimeRangeInput(event.target.value))
-                      setFieldErrors((current) => ({ ...current, timeRange: undefined }))
-                    }}
-                    aria-invalid={Boolean(fieldErrors.timeRange)}
-                    aria-describedby={fieldErrors.timeRange ? 'time-range-error' : 'time-range-hint'}
-                  />
-                </div>
-                {fieldErrors.timeRange
-                  ? <p className="field-error" id="time-range-error">{fieldErrors.timeRange}</p>
-                  : <p className="field-hint" id="time-range-hint">Format HH:MM · fra 00:00 til 48:00</p>}
-              </div>
-
-              <div className="field field-count">
-                <label htmlFor="departure-count">Avganger per side</label>
-                <div className="input-wrap">
-                  <span className="input-icon" aria-hidden="true">≋</span>
-                  <input
-                    id="departure-count"
-                    type="text"
-                    maxLength={2}
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    autoComplete="off"
-                    value={numberOfDepartures}
-                    onChange={(event) => {
-                      setNumberOfDepartures(event.target.value.replace(/\D/g, '').slice(0, 2))
-                      setFieldErrors((current) => ({ ...current, numberOfDepartures: undefined }))
-                    }}
-                    aria-invalid={Boolean(fieldErrors.numberOfDepartures)}
-                    aria-describedby={fieldErrors.numberOfDepartures ? 'count-error' : 'count-hint'}
-                  />
-                </div>
-                {fieldErrors.numberOfDepartures
-                  ? <p className="field-error" id="count-error">{fieldErrors.numberOfDepartures}</p>
-                  : <p className="field-hint" id="count-hint">Velg mellom 1 og {MAX_DEPARTURES}</p>}
-              </div>
-
               <button className="search-button" type="submit" disabled={stationsLoading || stations.length === 0 || searching}>
                 {searching ? <span className="spinner" aria-hidden="true" /> : <span aria-hidden="true">⌕</span>}
                 {searching ? 'Søker …' : 'Finn avganger'}
                 {!searching && <span className="button-arrow" aria-hidden="true">→</span>}
               </button>
             </div>
+            <details className="advanced-options" ref={advancedOptionsRef}>
+              <summary>Flere valg <span aria-hidden="true">⌄</span></summary>
+              <div className="advanced-fields">
+                <div className="field">
+                  <label htmlFor="time-range">Tidsvindu</label>
+                  <div className="input-wrap">
+                    <span className="input-icon" aria-hidden="true">◷</span>
+                    <input
+                      id="time-range"
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={5}
+                      placeholder="HH:MM"
+                      autoComplete="off"
+                      value={timeRange}
+                      onChange={(event) => {
+                        setTimeRange(formatTimeRangeInput(event.target.value))
+                        setFieldErrors((current) => ({ ...current, timeRange: undefined }))
+                      }}
+                      aria-invalid={Boolean(fieldErrors.timeRange)}
+                      aria-describedby={fieldErrors.timeRange ? 'time-range-error' : 'time-range-hint'}
+                    />
+                  </div>
+                  {fieldErrors.timeRange
+                    ? <p className="field-error" id="time-range-error">{fieldErrors.timeRange}</p>
+                    : <p className="field-hint" id="time-range-hint">Timer:minutter · 00:00–48:00</p>}
+                </div>
+
+                <div className="field">
+                  <label htmlFor="departure-count">Avganger per side</label>
+                  <div className="input-wrap">
+                    <span className="input-icon" aria-hidden="true">≋</span>
+                    <input
+                      id="departure-count"
+                      type="text"
+                      maxLength={2}
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      autoComplete="off"
+                      value={numberOfDepartures}
+                      onChange={(event) => {
+                        setNumberOfDepartures(event.target.value.replace(/\D/g, '').slice(0, 2))
+                        setFieldErrors((current) => ({ ...current, numberOfDepartures: undefined }))
+                      }}
+                      aria-invalid={Boolean(fieldErrors.numberOfDepartures)}
+                      aria-describedby={fieldErrors.numberOfDepartures ? 'count-error' : 'count-hint'}
+                    />
+                  </div>
+                  {fieldErrors.numberOfDepartures
+                    ? <p className="field-error" id="count-error">{fieldErrors.numberOfDepartures}</p>
+                    : <p className="field-hint" id="count-hint">1–{MAX_DEPARTURES} avganger</p>}
+                </div>
+              </div>
+            </details>
           </form>
 
           {requestError && (
@@ -476,16 +528,32 @@ function App() {
           <div className="results-heading">
             <div>
               <p className="eyebrow">AVGANGER OG RUTER</p>
-              <h2 id="results-title">{selectedStation?.name ?? 'Dine avganger'}</h2>
-              <p className="results-subtitle">{formatDate(displayedDate)}{selectedStation ? ` · ${selectedStation.shortName}` : ''}</p>
+              <h2 id="results-title">
+                {selectedFromStation?.name ?? 'Fra stasjon'}
+                <span className="results-route-arrow" aria-hidden="true"> → </span>
+                {selectedToStation?.name ?? 'Til stasjon'}
+              </h2>
+              <p className="results-subtitle">{formatDate(displayedDate)}</p>
             </div>
             {departures.length > 0 && (
               <div className="result-count">
-                <strong>{departures.length}</strong>
-                <span>{departures.length === 1 ? 'avgang' : 'avganger'} · side {page}</span>
+                <strong>{visibleDepartures.length}</strong>
+                <span>{replacementOnly ? `av ${departures.length} avganger` : `${departures.length === 1 ? 'avgang' : 'avganger'} · side ${page}`}</span>
               </div>
             )}
           </div>
+
+          {departures.length > 0 && (
+            <label className="replacement-filter">
+              <input
+                type="checkbox"
+                checked={replacementOnly}
+                onChange={(event) => setReplacementOnly(event.target.checked)}
+              />
+              <span className="replacement-filter-box" aria-hidden="true">{replacementOnly ? '✓' : ''}</span>
+              Vis kun buss for tog
+            </label>
+          )}
 
           {departureWarnings.map((warning, index) => (
             <div className="alert alert-warning" role="status" key={`${warning}-${index}`}>
@@ -500,14 +568,14 @@ function App() {
             </div>
           )}
 
-          {departures.length > 0 && (
+          {visibleDepartures.length > 0 && (
             <div className="departure-list">
-              {departures.map((departure, index) => (
+              {visibleDepartures.map((departure) => (
                 <DepartureCard
                   key={departure.id}
                   departure={departure}
-                  selectedStationId={displayedStationId}
-                  index={(page - 1) * (activeQuery?.pageSize ?? 0) + index}
+                  fromStationId={displayedFromStationId}
+                  toStationId={displayedToStationId}
                   detail={details[departure.id]}
                 />
               ))}
@@ -534,6 +602,23 @@ function App() {
             </p>
           )}
 
+          {!searching && !detailsLoading && departures.length > 0 && visibleDepartures.length === 0 && (
+            <div className="empty-state filter-empty-state">
+              {departures.some((departure) => details[departure.id]?.status === 'error')
+                ? <h3>Kunne ikke bekrefte buss for tog</h3>
+                : replacementOnly
+                  ? <h3>Ingen buss for tog på denne siden</h3>
+                  : <h3>Ingen avganger mellom stasjonene</h3>}
+              <p>
+                {departures.some((departure) => details[departure.id]?.status === 'error')
+                  ? 'Noen rutedetaljer mangler. Fjern filteret for å se alle avganger.'
+                  : replacementOnly
+                    ? 'Prøv neste side, eller fjern filteret for å se alle avganger.'
+                    : 'Prøv neste side, eller velg andre stasjoner eller en annen dato.'}
+              </p>
+            </div>
+          )}
+
           {!searching && departures.length === 0 && !requestError && (
             <div className="empty-state">
               <div className="empty-icon" aria-hidden="true">↗</div>
@@ -549,7 +634,7 @@ function App() {
                   ? 'Kontroller at API-et kjører, og last siden på nytt.'
                   : hasSearched
                     ? 'Det finnes ingen avganger i tidsvinduet. Prøv en annen dato eller et lengre tidsvindu.'
-                  : 'Velg stasjon og dato, og søk for å se avganger og rutedetaljer.'}
+                  : 'Velg fra- og til-stasjon og en dato for å se mulige avganger.'}
               </p>
             </div>
           )}
@@ -564,27 +649,168 @@ function App() {
   )
 }
 
+function isReplacementJourney(journey: JourneyDetails): boolean {
+  return journey.vehicleType?.toLowerCase() === 'bus' && journey.replacements.length > 0
+}
+
+function StationCombobox({
+  stations,
+  id,
+  errorId,
+  selectedId,
+  disabled,
+  error,
+  onSelect,
+}: {
+  stations: Station[]
+  id: string
+  errorId: string
+  selectedId: string
+  disabled: boolean
+  error?: string
+  onSelect: (stationId: string) => void
+}) {
+  const listId = useId()
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [activeIndex, setActiveIndex] = useState(0)
+  const selectedStation = stations.find((station) => station.id === selectedId)
+  const filteredStations = stations.filter((station) =>
+    `${station.name} ${station.shortName}`.toLocaleLowerCase('nb-NO')
+      .includes(search.toLocaleLowerCase('nb-NO')),
+  )
+
+  function chooseStation(station: Station) {
+    onSelect(station.id)
+    setSearch(station.name)
+    setOpen(false)
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setOpen(true)
+      setActiveIndex((current) => current < 0 ? 0 : Math.min(current + 1, filteredStations.length - 1))
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setOpen(true)
+      setActiveIndex((current) => Math.max(current - 1, 0))
+    } else if (event.key === 'Enter' && open && filteredStations[activeIndex]) {
+      event.preventDefault()
+      chooseStation(filteredStations[activeIndex])
+    } else if (event.key === 'Escape') {
+      setOpen(false)
+      setSearch(selectedStation?.name ?? '')
+    }
+  }
+
+  return (
+    <div className={`station-combobox input-wrap${error ? ' has-error' : ''}`}>
+      <span className="input-icon" aria-hidden="true">⌖</span>
+      <input
+        id={id}
+        type="text"
+        role="combobox"
+        value={open ? search : selectedStation?.name ?? ''}
+        placeholder={disabled ? 'Henter stasjoner …' : 'Søk etter stasjon'}
+        autoComplete="off"
+        disabled={disabled}
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={open && filteredStations[activeIndex] ? `${listId}-${activeIndex}` : undefined}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? errorId : undefined}
+        onFocus={() => {
+          setSearch('')
+          setActiveIndex(-1)
+          setOpen(true)
+        }}
+        onBlur={() => {
+          setOpen(false)
+          setSearch(selectedStation?.name ?? '')
+        }}
+        onChange={(event) => {
+          setSearch(event.target.value)
+          setActiveIndex(-1)
+          setOpen(true)
+        }}
+        onKeyDown={handleKeyDown}
+      />
+      {open && (
+        <div className="station-options" id={listId} role="listbox" aria-label="Stasjoner">
+          {filteredStations.length > 0
+            ? filteredStations.map((station, index) => (
+              <div
+                key={station.id}
+                id={`${listId}-${index}`}
+                className="station-option"
+                role="option"
+                aria-selected={station.id === selectedId}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => chooseStation(station)}
+              >
+                <span>{station.name}</span>
+                {station.shortName !== station.name && <small>{station.shortName}</small>}
+              </div>
+            ))
+            : <p className="station-empty">Ingen stasjoner funnet</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function getJourneySegment(
+  journey: JourneyDetails,
+  fromStationId: string,
+  toStationId: string,
+): JourneyCall[] | null {
+  const calls = [...journey.calls].sort((first, second) => first.order - second.order)
+  const fromIndex = calls.findIndex((call) => call.quayId === fromStationId)
+  const toIndex = calls.findIndex((call) => call.quayId === toStationId)
+  if (fromIndex < 0 || toIndex <= fromIndex) return null
+  return calls.slice(fromIndex, toIndex + 1)
+}
+
+function estimatedJourneyMinutes(segment: JourneyCall[]): number | null {
+  const first = segment[0]
+  const last = segment[segment.length - 1]
+  const departure = first.expectedDeparture ?? first.departure
+  const arrival = last.expectedArrival ?? last.arrival
+  if (!departure || !arrival) return null
+  const duration = Math.round((new Date(arrival).getTime() - new Date(departure).getTime()) / 60_000)
+  return Number.isFinite(duration) && duration >= 0 ? duration : null
+}
+
+function formatDuration(minutes: number): string {
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  if (hours === 0) return `${remainingMinutes} min`
+  if (remainingMinutes === 0) return `${hours} t`
+  return `${hours} t ${remainingMinutes} min`
+}
+
 function DepartureCard({
   departure,
-  selectedStationId,
-  index,
+  fromStationId,
+  toStationId,
   detail,
 }: {
   departure: Departure
-  selectedStationId: string
-  index: number
+  fromStationId: string
+  toStationId: string
   detail: DetailState | undefined
 }) {
   const journey = detail?.status === 'loaded' ? detail.journey : undefined
-  const isReplacement = journey?.vehicleType?.toLowerCase() === 'bus'
-    && (journey.replacements?.length ?? 0) > 0
-  const selectedCall = journey?.calls?.find((call) => call.quayId === selectedStationId)
-    ?? journey?.calls?.[0]
+  const isReplacement = journey ? isReplacementJourney(journey) : false
+  const segment = journey ? getJourneySegment(journey, fromStationId, toStationId) : null
+  const selectedCall = segment?.[0]
   const departureTime = formatTime(selectedCall?.departure ?? selectedCall?.arrival ?? null)
-  const destination = selectedCall?.destination || journey?.calls?.[journey.calls.length - 1]?.name
-  const origin = journey?.calls?.[0]?.name
+  const duration = segment ? estimatedJourneyMinutes(segment) : null
+  const isCancelled = segment?.some((call) => call.cancelled === true) ?? false
   const [open, setOpen] = useState(false)
-  const title = journey?.lineNumber || `Avgang ${String(index + 1).padStart(2, '0')}`
+  const title = journey?.lineNumber || 'Avgang'
   const detailWarnings = detail?.status === 'loaded' ? detail.warnings : []
   const closeButton = (
     <button
@@ -610,14 +836,22 @@ function DepartureCard({
               {journey.vehicleType === 'train' ? 'Tog' : 'Buss'}
             </span>
           )}
+          {isCancelled && <span className="cancelled-badge" role="status">Kansellert</span>}
         </div>
-        <p className="departure-route">
-          {origin && <span><small>Fra</small> {origin}</span>}
-          {origin && destination && <span aria-hidden="true" className="route-arrow">→</span>}
-          {destination && <span><small>Til</small> {destination}</span>}
-          {!origin && !destination && 'Rutedetaljer fra valgt stasjon'}
-        </p>
-        <p className="departure-id">{departure.id}</p>
+        {segment && (
+          <ol className="trip-stops" aria-label="Stopp mellom valgt fra- og til-stasjon">
+            {segment.map((call, index) => (
+              <li key={`${call.quayId ?? call.name}-${index}`} className={index === 0 || index === segment.length - 1 ? 'trip-stop-endpoint' : ''}>
+                <span className="trip-stop-marker" aria-hidden="true" />
+                <span className="trip-stop-name">{call.name || 'Stopp'}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+        {duration !== null && <p className="estimated-duration">Antatt reisetid: {formatDuration(duration)}</p>}
+        {!selectedCall && detail?.status === 'loaded' && (
+          <p className="route-unavailable">Ruten har ikke begge valgte stasjonene.</p>
+        )}
         {detail?.status === 'error' && (
           <p className="detail-error-message" role="status">{detail.message}</p>
         )}
@@ -650,6 +884,10 @@ function JourneyPanel({
   warnings: string[]
   onClose: ReactNode
 }) {
+  const showExpected = journey.calls.some((call) => call.expectedArrival || call.expectedDeparture)
+  const showActual = journey.calls.some((call) => call.actualArrival || call.actualDeparture)
+  const timeColumnCount = 1 + Number(showExpected) + Number(showActual)
+
   return (
     <div className="journey-panel">
       {onClose}
@@ -681,13 +919,13 @@ function JourneyPanel({
                 {call.canAlight ? 'Avstigning' : ''}
               </span>
             </div>
-            <div className="stop-times">
-              <span><small>Plan</small>{formatTime(call.arrival)} / {formatTime(call.departure)}</span>
-              {(call.expectedArrival || call.expectedDeparture) && (
-                <span><small>Forventet</small>{formatTime(call.expectedArrival)} / {formatTime(call.expectedDeparture)}</span>
+            <div className={`stop-times stop-times-${timeColumnCount}`}>
+              <span><small>Plan</small>{formatTimePair(call.arrival, call.departure)}</span>
+              {showExpected && (
+                <span><small>Forventet</small>{formatTimePair(call.expectedArrival, call.expectedDeparture)}</span>
               )}
-              {(call.actualArrival || call.actualDeparture) && (
-                <span><small>Faktisk</small>{formatTime(call.actualArrival)} / {formatTime(call.actualDeparture)}</span>
+              {showActual && (
+                <span><small>Faktisk</small>{formatTimePair(call.actualArrival, call.actualDeparture)}</span>
               )}
             </div>
           </li>
@@ -700,6 +938,10 @@ function JourneyPanel({
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
   return 'Noe gikk galt. Prøv igjen.'
+}
+
+function formatTimePair(first: string | null, second: string | null): string {
+  return [first, second].filter((value): value is string => value !== null).map(formatTime).join(' / ') || '—'
 }
 
 export default App

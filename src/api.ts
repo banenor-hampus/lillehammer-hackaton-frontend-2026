@@ -22,6 +22,7 @@ export interface JourneyCall {
   expectedDeparture: string | null
   actualArrival: string | null
   actualDeparture: string | null
+  cancelled: boolean | null
   canBoard: boolean | null
   canAlight: boolean | null
 }
@@ -201,6 +202,7 @@ export async function getJourneyDetails(
         expectedDeparture: asString(item.ETD),
         actualArrival: asString(item.ATA),
         actualDeparture: asString(item.ATD),
+        cancelled: asBoolean(item.CANCELLED),
         canBoard: asBoolean(item.Boarding_Activity),
         canAlight: asBoolean(item.Alightning_Activity),
       }]
